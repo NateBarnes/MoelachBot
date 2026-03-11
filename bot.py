@@ -13,9 +13,21 @@ from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from death_rattles import DEATH_RATTLES
-
 load_dotenv()
+
+
+def _load_death_rattles() -> list[str]:
+    path = Path(__file__).parent / "death_rattles.md"
+    rattles = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("- "):
+            entry = line[2:].strip().strip('"')
+            rattles.append(entry)
+    return rattles
+
+
+DEATH_RATTLES = _load_death_rattles()
 
 log = logging.getLogger("moelachbot")
 log.setLevel(logging.DEBUG)

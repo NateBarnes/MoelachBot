@@ -24,6 +24,9 @@ def _load_death_rattles() -> list[str]:
         if line.startswith("- "):
             entry = line[2:].strip().strip('"')
             rattles.append(entry)
+        elif line and line[0].isdigit() and ". " in line:
+            entry = line.split(". ", 1)[1].strip().strip('"')
+            rattles.append(entry)
     return rattles
 
 
@@ -116,6 +119,7 @@ SCHEDULE_DAY = os.getenv("SCHEDULE_DAY", "wed")
 SCHEDULE_HOUR = int(os.getenv("SCHEDULE_HOUR", "10"))
 SCHEDULE_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "0"))
 SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "America/Los_Angeles")
+SCHEDULE_RATTLE = os.getenv("SCHEDULE_RATTLE", "")
 
 
 def _resolve_channel_ids(app: App, names: list[str]) -> list[str]:
@@ -242,9 +246,13 @@ def _schedule_reactive_post(app: App, channel: str) -> None:
 
 def _scheduled_post(app: App) -> None:
     try:
-        state = _load_state()
-        rattle = _pick_rattle(state)
-        _save_state(state)
+        if SCHEDULE_RATTLE:
+            idx = int(SCHEDULE_RATTLE) - 1
+            rattle = DEATH_RATTLES[idx]
+        else:
+            state = _load_state()
+            rattle = _pick_rattle(state)
+            _save_state(state)
         app.client.chat_postMessage(
             channel=SCHEDULE_CHANNEL, text=_format_rattle(rattle)
         )
@@ -310,6 +318,8 @@ def main():
     log.info("  Cooldown: %.1f hours", COOLDOWN_HOURS)
     log.info("  Random delay max: %d minutes", RANDOM_DELAY_MAX_MINUTES)
     log.info("  Schedule channel: %s", SCHEDULE_CHANNEL or "(none)")
+    if SCHEDULE_RATTLE:
+        log.info("  Scheduled rattle: #%s", SCHEDULE_RATTLE)
 
     # Set up scheduled posting if configured
     if SCHEDULE_CHANNEL:

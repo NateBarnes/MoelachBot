@@ -35,7 +35,55 @@ STATE_FILE = Path(__file__).parent / "state.json"
 
 # ---------------------------------------------------------------------------
 # Configuration
+# NOTE: Required OAuth scopes:
+#   - channels:history  (receive message events in public channels)
+#   - channels:read     (resolve channel names to IDs)
+#   - chat:write        (post messages)
+# Under Event Subscriptions → Subscribe to bot events, enable:
+#   message.channels
 # ---------------------------------------------------------------------------
+
+REQUIRED_SCOPES = {
+    "channels:history": "receive message events in public channels",
+    "channels:read": "resolve channel names to IDs",
+    "chat:write": "post messages",
+}
+
+
+def _check_scopes(app: App) -> None:
+    """Check that the bot token has all required OAuth scopes.
+
+    Uses the x-oauth-scopes header from an auth.test call to determine
+    the token's granted scopes. Logs a warning for each missing scope.
+    """
+    try:
+        resp = app.client.auth_test()
+        headers = resp.headers if hasattr(resp, "headers") else {}
+        raw = headers.get("x-oauth-scopes", "")
+        if not raw:
+            log.warning(
+                "Could not determine bot scopes from auth.test response headers — "
+                "skipping scope validation"
+            )
+            return
+        granted = {s.strip() for s in raw.split(",")}
+        missing = {s for s in REQUIRED_SCOPES if s not in granted}
+        if missing:
+            log.warning("=" * 60)
+            log.warning("MISSING REQUIRED OAUTH SCOPES")
+            for scope in sorted(missing):
+                log.warning(
+                    "  - %s  (%s)", scope, REQUIRED_SCOPES[scope]
+                )
+            log.warning(
+                "Add the missing scope(s) at https://api.slack.com/apps → "
+                "OAuth & Permissions, then reinstall the app to your workspace."
+            )
+            log.warning("=" * 60)
+        else:
+            log.info("All required OAuth scopes are present: %s", ", ".join(sorted(granted)))
+    except Exception:
+        log.exception("Failed to validate OAuth scopes")
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
@@ -55,6 +103,31 @@ SCHEDULE_DAY = os.getenv("SCHEDULE_DAY", "wed")
 SCHEDULE_HOUR = int(os.getenv("SCHEDULE_HOUR", "10"))
 SCHEDULE_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "0"))
 SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "America/Los_Angeles")
+
+
+def _resolve_channel_ids(app: App, names: list[str]) -> list[str]:
+    """Convert channel names to channel IDs via the Slack API."""
+    if not names:
+        return []
+    try:
+        result = app.client.conversations_list(
+            types="public_channel", limit=1000
+        )
+        name_to_id = {c["name"]: c["id"] for c in result["channels"]}
+        resolved = []
+        for name in names:
+            if name.startswith("C"):  # already looks like an ID
+                resolved.append(name)
+            elif name in name_to_id:
+                resolved.append(name_to_id[name])
+                log.info("Resolved channel '%s' -> %s", name, name_to_id[name])
+            else:
+                log.warning("Could not resolve channel name '%s' — not found", name)
+        return resolved
+    except Exception:
+        log.exception("Failed to resolve channel names, falling back to raw values")
+        return names
+
 
 # ---------------------------------------------------------------------------
 # State helpers  (tracks cooldowns + used-rattle indices)
@@ -171,6 +244,17 @@ def handle_message(event, say):
 
 
 def main():
+    global MONITORED_CHANNELS, SCHEDULE_CHANNEL
+
+    # Validate that the bot token has the scopes we need
+    _check_scopes(app)
+
+    # Resolve human-readable channel names to Slack channel IDs
+    MONITORED_CHANNELS = _resolve_channel_ids(app, MONITORED_CHANNELS)
+    if SCHEDULE_CHANNEL:
+        resolved = _resolve_channel_ids(app, [SCHEDULE_CHANNEL])
+        SCHEDULE_CHANNEL = resolved[0] if resolved else SCHEDULE_CHANNEL
+
     log.info("Starting MoelachBot")
     log.info("  Monitored channels: %s", MONITORED_CHANNELS or "(none)")
     log.info("  Cooldown: %.1f hours", COOLDOWN_HOURS)

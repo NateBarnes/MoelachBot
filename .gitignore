@@ -20,5 +20,8 @@ venv/
 .idea/
 .vscode/
 
+# Logs
+moelachbot.log
+
 # OS
 .DS_Store

@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import os
@@ -144,6 +145,28 @@ def _save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def _reset_cooldown(channel: str | None) -> None:
+    """Clear the cooldown for a channel, or all channels if none specified."""
+    state = _load_state()
+    if channel:
+        if channel in state.get("last_reactive", {}):
+            del state["last_reactive"][channel]
+            print(f"Cooldown cleared for channel: {channel}")
+        else:
+            print(f"No cooldown found for channel: {channel}")
+            existing = state.get("last_reactive", {})
+            if existing:
+                print("Current cooldowns:")
+                for cid, ts in existing.items():
+                    print(f"  {cid}: {time.ctime(ts)}")
+            else:
+                print("No cooldowns are currently set.")
+    else:
+        state["last_reactive"] = {}
+        print("All cooldowns cleared.")
+    _save_state(state)
+
+
 def _pick_rattle(state: dict) -> str:
     """Pick a random Death Rattle, cycling through all before repeating."""
     used = state.get("used_indices", [])
@@ -245,6 +268,21 @@ def handle_message(event, say):
 
 def main():
     global MONITORED_CHANNELS, SCHEDULE_CHANNEL
+
+    parser = argparse.ArgumentParser(description="MoelachBot")
+    parser.add_argument(
+        "--reset-cooldown",
+        nargs="?",
+        const="__all__",
+        metavar="CHANNEL",
+        help="Clear cooldown for CHANNEL (name or ID), or all channels if omitted",
+    )
+    args = parser.parse_args()
+
+    if args.reset_cooldown:
+        channel = None if args.reset_cooldown == "__all__" else args.reset_cooldown
+        _reset_cooldown(channel)
+        return
 
     # Validate that the bot token has the scopes we need
     _check_scopes(app)

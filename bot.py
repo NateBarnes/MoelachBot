@@ -297,11 +297,32 @@ def main():
         metavar="CHANNEL",
         help="Clear cooldown for CHANNEL (name or ID), or all channels if omitted",
     )
+    parser.add_argument(
+        "--send",
+        metavar="MESSAGE",
+        help="Send MESSAGE to the schedule channel (or --channel) and exit",
+    )
+    parser.add_argument(
+        "--channel",
+        metavar="CHANNEL",
+        help="Override target channel for --send (default: SCHEDULE_CHANNEL)",
+    )
     args = parser.parse_args()
 
     if args.reset_cooldown:
         channel = None if args.reset_cooldown == "__all__" else args.reset_cooldown
         _reset_cooldown(channel)
+        return
+
+    if args.send:
+        channel = args.channel or SCHEDULE_CHANNEL
+        if not channel:
+            print("Error: no channel specified. Set SCHEDULE_CHANNEL or use --channel.")
+            return
+        resolved = _resolve_channel_ids(app, [channel])
+        target = resolved[0] if resolved else channel
+        app.client.chat_postMessage(channel=target, text=_format_rattle(args.send))
+        print(f"Sent to {target}: {_format_rattle(args.send)}")
         return
 
     # Validate that the bot token has the scopes we need

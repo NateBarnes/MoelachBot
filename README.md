@@ -76,3 +76,35 @@ The 34 death rattle quotes live in `death_rattles.md`. Edit that file to add, re
 **Scheduled posting:** Uses APScheduler to post a death rattle to `SCHEDULE_CHANNEL` at the configured day and time each week.
 
 **State** is persisted to `state.json` (cooldown timestamps and used rattle indices). Logs go to both the console and `moelachbot.log`.
+
+## Project Layout
+
+`bot.py` at the repo root is a thin entry point — it loads `.env` and calls into
+the package. The behavior lives in `moelachbot/`:
+
+| Module | Responsibility |
+|---|---|
+| `config.py` | `Config.from_env(mapping)`, `Paths.from_base(dir)` |
+| `rattles.py` | Parsing `death_rattles.md`, picking and formatting rattles |
+| `state.py` | `StateStore` (JSON persistence), cooldown arithmetic |
+| `clock.py` | `Clock` protocol + `SystemClock` |
+| `runner.py` | Thread seam for delayed reactive posts |
+| `slack_api.py` | Scope validation and channel name → ID resolution |
+| `core.py` | `MoelachBot` — the actual behavior |
+| `cli.py` | Argument parsing, logging setup, and startup wiring |
+
+Dependencies are injected rather than constructed at import, so importing the
+package has no side effects: no `.env` read, no filesystem writes, no network.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+pytest --cov=moelachbot --cov-report=term-missing
+```
+
+The suite runs fully offline — a fixture fails any test that attempts a network
+connection. Tests marked `contract` assert against the real `death_rattles.md`,
+so they will fail if the quote count changes; update them deliberately when you
+edit that file.

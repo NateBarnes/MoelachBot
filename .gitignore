@@ -13,6 +13,14 @@ __pycache__/
 venv/
 .venv/
 
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+
 # Editor swap files
 *.swp
 *.swo

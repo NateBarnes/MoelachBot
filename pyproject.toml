@@ -1,0 +1,14 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "contract: asserts against the real death_rattles.md checked into the repo",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["moelachbot"]
+
+[tool.coverage.report]
+show_missing = true

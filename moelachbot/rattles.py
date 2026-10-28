@@ -25,7 +25,20 @@ def load_death_rattles(path: Path) -> list[str]:
 
 
 def format_rattle(rattle: str) -> str:
-    return f"_{rattle}_"
+    """Italicise the text for Slack.
+
+    Slack's mrkdwn will not carry inline formatting across a blank line, so one
+    pair of underscores around a multi-paragraph message renders the
+    underscores literally. Wrap each non-empty line instead and leave blank
+    lines alone, so paragraph breaks survive and any *bold* the caller wrote
+    nests inside the italics. Single-line input never hits the split, which
+    keeps every death rattle byte-identical to before.
+    """
+    if "\n" not in rattle:
+        return f"_{rattle}_"
+    return "\n".join(
+        f"_{line}_" if line.strip() else line for line in rattle.split("\n")
+    )
 
 
 def pick_rattle(

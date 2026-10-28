@@ -368,3 +368,24 @@ def test_format_rattle_does_not_escape_existing_underscores():
 
 def test_format_rattle_leaves_other_markup_alone():
     assert format_rattle('*bold* "quoted" <link>') == '_*bold* "quoted" <link>_'
+
+
+def test_format_rattle_wraps_each_paragraph_separately():
+    """Slack drops inline formatting across a blank line, so one pair of
+    underscores spanning both paragraphs would render literally."""
+    text = "first para\n\nsecond para"
+    assert format_rattle(text) == "_first para_\n\n_second para_"
+
+
+def test_format_rattle_nests_bold_inside_the_per_line_italics():
+    text = "a rattle\n\n*It is Wednesday*"
+    assert format_rattle(text) == "_a rattle_\n\n_*It is Wednesday*_"
+
+
+def test_format_rattle_leaves_blank_and_whitespace_only_lines_untouched():
+    assert format_rattle("a\n\nb") == "_a_\n\n_b_"
+    assert format_rattle("a\n   \nb") == "_a_\n   \n_b_"
+
+
+def test_format_rattle_handles_consecutive_content_lines():
+    assert format_rattle("one\ntwo") == "_one_\n_two_"

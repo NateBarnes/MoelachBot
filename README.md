@@ -15,6 +15,18 @@ A Slack bot that posts randomly selected Death Rattles from Brandon Sanderson's 
 4. Subscribe to the `message.channels` event under Event Subscriptions
 5. Install the app to your workspace and copy the bot token (`xoxb-...`)
 
+**Private channels** need two more scopes, and they are separate requirements:
+adding only the first leaves reactive posting silently broken.
+
+- `groups:read` — list private channels, so their names resolve to IDs
+- `groups:history` — receive their message events, which also needs a
+  `message.groups` event subscription alongside `message.channels`
+
+Without both, a private channel still works for scheduled and `--send` posts as
+long as the bot is a member, because `chat.postMessage` accepts a channel name.
+It cannot work in `MONITORED_CHANNELS`: reactive posting matches on the channel
+ID carried by the incoming event, and that ID never gets resolved.
+
 ### Installation
 
 Requires Python 3.10+.

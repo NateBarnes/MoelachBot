@@ -204,8 +204,9 @@ def main(
         if not channel:
             print("Error: no channel specified. Set SCHEDULE_CHANNEL or use --channel.")
             return
-        resolved = resolve_channel_ids(app.client, [channel], log)
-        target = resolved[0] if resolved else channel
+        # [0] is safe: `channel` is guarded non-empty above, and the resolver
+        # returns one entry per input name, passing unresolvable ones through.
+        target = resolve_channel_ids(app.client, [channel], log)[0]
         app.client.chat_postMessage(channel=target, text=format_rattle(args.send))
         print(f"Sent to {target}: {format_rattle(args.send)}")
         return

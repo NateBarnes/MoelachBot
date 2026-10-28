@@ -214,6 +214,32 @@ def channel_list():
     return _set
 
 
+@pytest.fixture
+def channel_pages():
+    """Point conversations_list at a *sequence* of pages.
+
+    Separate from channel_list rather than folded into it: that fixture's
+    single return_value is what keeps its callers single-page, and a paginating
+    resolver would otherwise see the same page forever. Each mapping becomes one
+    page; every page but the last carries a next_cursor.
+    """
+
+    def _set(client, pages: list[dict[str, str]], *, last_cursor: str = "") -> None:
+        responses = []
+        for i, mapping in enumerate(pages):
+            is_last = i == len(pages) - 1
+            cursor = last_cursor if is_last else f"cursor-{i + 1}"
+            responses.append(
+                {
+                    "channels": [{"name": n, "id": j} for n, j in mapping.items()],
+                    "response_metadata": {"next_cursor": cursor},
+                }
+            )
+        client.conversations_list.side_effect = responses
+
+    return _set
+
+
 # ----------------------------------------------------------------------- state
 
 

@@ -17,6 +17,7 @@ import logging
 
 import pytest
 
+from moelachbot import slack_api
 from moelachbot.config import Config
 from moelachbot.slack_api import (
     REQUIRED_SCOPES,
@@ -231,7 +232,7 @@ def test_id_like_name_passes_through_but_api_is_still_called(
     assert messages_at(caplog, logging.INFO) == []
 
 
-def test_unknown_name_is_dropped_with_a_warning(
+def test_unknown_name_passes_through_with_an_info_line(
     slack_client, channel_list, log, caplog
 ):
     channel_list(slack_client, {"general": "C1"})
@@ -239,18 +240,26 @@ def test_unknown_name_is_dropped_with_a_warning(
 
     resolved = resolve_channel_ids(slack_client, names, log)
 
-    # Deliberate: output is *shorter* than input; unresolvable names vanish.
-    assert resolved == ["C1"]
-    assert len(resolved) < len(names)
-    assert messages_at(caplog, logging.WARNING) == [
-        "Could not resolve channel name 'ghost' — not found"
+    # One entry per input name: 'ghost' survives as itself so chat.postMessage
+    # still gets something, and so a caller that needs a real ID can tell.
+    assert resolved == ["C1", "ghost"]
+    assert len(resolved) == len(names)
+    # INFO, not WARNING: nothing is broken by a passthrough at this layer.
+    assert messages_at(caplog, logging.WARNING) == []
+    assert messages_at(caplog, logging.INFO) == [
+        "Resolved channel 'general' -> C1",
+        "Channel 'ghost' is not among the 1 channels this token can list "
+        "— passing the name through to Slack, which accepts names",
     ]
 
 
-def test_all_names_unknown_returns_empty_list(slack_client, channel_list, log):
+def test_all_names_unknown_pass_through_unchanged(slack_client, channel_list, log):
     channel_list(slack_client, {"general": "C1"})
+    names = ["ghost", "phantom"]
 
-    assert resolve_channel_ids(slack_client, ["ghost", "phantom"], log) == []
+    # The length invariant is the whole contract, so it is asserted even here
+    # where nothing resolves.
+    assert resolve_channel_ids(slack_client, names, log) == names
 
 
 def test_mixed_ids_known_and_unknown_preserve_input_order(
@@ -265,7 +274,7 @@ def test_mixed_ids_known_and_unknown_preserve_input_order(
         slack_client, ["random", "CRAW123", "ghost", "general"], log
     )
 
-    assert resolved == ["C2", "CRAW123", "C1"]
+    assert resolved == ["C2", "CRAW123", "ghost", "C1"]
 
 
 def test_conversations_list_called_with_exact_kwargs(
@@ -275,24 +284,11 @@ def test_conversations_list_called_with_exact_kwargs(
 
     resolve_channel_ids(slack_client, ["general"], log)
 
+    # cursor is always passed, even on the first page: slack_sdk strips None
+    # values from the payload, so the request on the wire is unchanged.
     slack_client.conversations_list.assert_called_once_with(
-        types="public_channel", limit=1000
+        types="public_channel", limit=1000, cursor=None
     )
-
-
-def test_pagination_cursor_is_never_followed(slack_client, log):
-    slack_client.conversations_list.return_value = {
-        "channels": [{"name": "general", "id": "C1"}],
-        "response_metadata": {"next_cursor": "dXNlcjpVMDYxTkZUVDI="},
-    }
-
-    resolved = resolve_channel_ids(slack_client, ["general", "on-page-two"], log)
-
-    # Deliberate documentation of a real limitation: only the first page is read,
-    # so a workspace with >1000 public channels silently loses the rest.
-    assert resolved == ["C1"]
-    assert slack_client.conversations_list.call_count == 1
-    assert "cursor" not in slack_client.conversations_list.call_args.kwargs
 
 
 def test_api_exception_returns_the_input_names_unchanged(
@@ -340,11 +336,10 @@ def test_id_detection_is_case_sensitive(slack_client, channel_list, log, caplog)
     channel_list(slack_client, {"general": "C1"})
 
     # Lowercase "cats" is NOT an ID: startswith("C") is case-sensitive, so it is
-    # looked up, missed, and dropped...
-    assert resolve_channel_ids(slack_client, ["cats"], log) == []
-    assert messages_at(caplog, logging.WARNING) == [
-        "Could not resolve channel name 'cats' — not found"
-    ]
+    # looked up, missed, and passed through with an INFO line...
+    assert resolve_channel_ids(slack_client, ["cats"], log) == ["cats"]
+    assert messages_at(caplog, logging.WARNING) == []
+    assert any("'cats' is not among" in m for m in messages_at(caplog, logging.INFO))
 
     # ...while capital-C "Cats" is waved straight through as if it were an ID.
     assert resolve_channel_ids(slack_client, ["Cats"], log) == ["Cats"]
@@ -361,6 +356,89 @@ def test_duplicate_names_resolve_to_duplicate_ids(
         "C1",
     ]
     assert len(messages_at(caplog, logging.INFO)) == 2
+
+
+def test_length_invariant_holds_for_every_mix_of_inputs(
+    slack_client, channel_list, log
+):
+    """The contract the rest of the module leans on. Dropping names is what
+    used to hand resolve_config_channels an empty monitored tuple."""
+    channel_list(slack_client, {"general": "C1"})
+    names = ["general", "ghost", "C0RAW", "general"]
+
+    assert len(resolve_channel_ids(slack_client, names, log)) == len(names)
+
+
+def test_cursor_is_followed_across_pages(slack_client, channel_pages, log):
+    channel_pages(slack_client, [{"general": "C1"}, {"on-page-two": "C2"}])
+
+    resolved = resolve_channel_ids(slack_client, ["general", "on-page-two"], log)
+
+    assert resolved == ["C1", "C2"]
+    assert slack_client.conversations_list.call_count == 2
+    assert slack_client.conversations_list.call_args_list[0].kwargs["cursor"] is None
+    assert (
+        slack_client.conversations_list.call_args_list[1].kwargs["cursor"]
+        == "cursor-1"
+    )
+
+
+def test_an_empty_next_cursor_stops_after_one_page(
+    slack_client, channel_pages, log
+):
+    channel_pages(slack_client, [{"general": "C1"}])
+
+    assert resolve_channel_ids(slack_client, ["general"], log) == ["C1"]
+    assert slack_client.conversations_list.call_count == 1
+
+
+def test_null_response_metadata_is_treated_as_no_cursor(
+    slack_client, log, caplog
+):
+    # Slack sends an explicit null here on some final pages; `.get(k, {})` would
+    # hand back that None and the next .get would raise straight into the
+    # except branch, turning a good response into "falling back to raw values".
+    slack_client.conversations_list.return_value = {
+        "channels": [{"name": "general", "id": "C1"}],
+        "response_metadata": None,
+    }
+
+    assert resolve_channel_ids(slack_client, ["general"], log) == ["C1"]
+    assert error_records(caplog) == []
+    assert slack_client.conversations_list.call_count == 1
+
+
+def test_a_repeating_cursor_stops_instead_of_looping(slack_client, log):
+    # A plain return_value replays the same page, cursor included, forever.
+    slack_client.conversations_list.return_value = {
+        "channels": [{"name": "general", "id": "C1"}],
+        "response_metadata": {"next_cursor": "stuck"},
+    }
+
+    assert resolve_channel_ids(slack_client, ["general"], log) == ["C1"]
+    # Second call is the one that sees the cursor repeat and bails.
+    assert slack_client.conversations_list.call_count == 2
+
+
+def test_the_page_ceiling_warns_rather_than_truncating_silently(
+    slack_client, log, caplog, mocker
+):
+    mocker.patch.object(slack_api, "MAX_CHANNEL_PAGES", 3)
+    pages = [
+        {
+            "channels": [{"name": f"c{i}", "id": f"C{i}"}],
+            "response_metadata": {"next_cursor": f"cursor-{i}"},
+        }
+        for i in range(3)
+    ]
+    slack_client.conversations_list.side_effect = pages
+
+    assert resolve_channel_ids(slack_client, ["c0"], log) == ["C0"]
+    assert slack_client.conversations_list.call_count == 3
+    assert messages_at(caplog, logging.WARNING) == [
+        "Stopped paging conversations.list at 3 pages; the channel list may be "
+        "incomplete, so some names will not resolve"
+    ]
 
 
 # ===================================================== resolve_config_channels
@@ -399,7 +477,7 @@ def test_resolves_both_monitored_channels_and_schedule_channel(
     assert result.schedule_channel == "C3"
 
 
-def test_schedule_channel_keeps_its_raw_value_when_resolution_drops_it(
+def test_schedule_channel_keeps_its_raw_value_when_it_is_not_public(
     config, slack_client, channel_list, log, caplog
 ):
     channel_list(slack_client, {"general": "C1"})
@@ -409,10 +487,12 @@ def test_schedule_channel_keeps_its_raw_value_when_resolution_drops_it(
 
     result = resolve_config_channels(original, slack_client, log)
 
-    # resolve_channel_ids returned [], so the raw name survives into the Config
-    # and will later be handed to chat.postMessage as-is.
+    # The resolver passes the name through, so the raw value reaches the Config
+    # and is later handed to chat.postMessage as-is. No warning: only the
+    # *monitored* list is broken by a name that never became an ID.
     assert result.schedule_channel == "ghost"
-    assert any("ghost" in m for m in messages_at(caplog, logging.WARNING))
+    assert messages_at(caplog, logging.WARNING) == []
+    assert any("'ghost' is not among" in m for m in messages_at(caplog, logging.INFO))
 
 
 def test_empty_schedule_channel_skips_the_second_lookup(
@@ -439,3 +519,56 @@ def test_no_channels_at_all_makes_no_api_calls(config, slack_client, log):
     assert result.monitored_channels == ()
     assert result.schedule_channel == ""
     slack_client.conversations_list.assert_not_called()
+
+
+def test_an_unresolved_monitored_channel_warns_with_both_requirements(
+    config, slack_client, channel_list, log, caplog
+):
+    channel_list(slack_client, {"general": "C1"})
+    original = dataclasses.replace(
+        config, monitored_channels=("moelach_test",), schedule_channel=""
+    )
+
+    result = resolve_config_channels(original, slack_client, log)
+
+    # The name survives, so the startup banner reports what is configured
+    # instead of lying with "(none)".
+    assert result.monitored_channels == ("moelach_test",)
+    warnings = messages_at(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    assert "reactive posting will never fire" in warnings[0]
+    # Both halves, or the reader adds groups:read and stays broken.
+    assert "groups:read" in warnings[0]
+    assert "groups:history" in warnings[0]
+    assert "message.groups" in warnings[0]
+
+
+def test_a_monitored_channel_given_as_an_id_does_not_warn(
+    config, slack_client, channel_list, log, caplog
+):
+    """An ID is passed through unchanged too, so the input == output test for a
+    passthrough has to exclude it or every correctly-configured bot warns."""
+    channel_list(slack_client, {"general": "C1"})
+    original = dataclasses.replace(
+        config, monitored_channels=("C0ALREADY",), schedule_channel=""
+    )
+
+    result = resolve_config_channels(original, slack_client, log)
+
+    assert result.monitored_channels == ("C0ALREADY",)
+    assert messages_at(caplog, logging.WARNING) == []
+
+
+def test_an_unresolved_schedule_channel_does_not_warn(
+    config, slack_client, channel_list, log, caplog
+):
+    channel_list(slack_client, {"general": "C1"})
+    original = dataclasses.replace(
+        config, monitored_channels=(), schedule_channel="moelach_test"
+    )
+
+    result = resolve_config_channels(original, slack_client, log)
+
+    # chat.postMessage takes the name, so there is nothing to warn about.
+    assert result.schedule_channel == "moelach_test"
+    assert messages_at(caplog, logging.WARNING) == []

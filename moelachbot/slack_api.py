@@ -13,6 +13,19 @@ REQUIRED_SCOPES = {
     "chat:write": "post messages",
 }
 
+# Enough for 50_000 channels at the page size below. A ceiling rather than a
+# bare `while True`: a server that keeps handing back the same cursor would
+# otherwise spin forever.
+MAX_CHANNEL_PAGES = 50
+
+# Named once: a half-fix that adds only groups:read makes the warning disappear
+# while reactive posting stays dead, because the events never arrive.
+PRIVATE_CHANNEL_HINT = (
+    "resolving a private channel's ID needs the groups:read scope, and "
+    "receiving its messages needs groups:history plus a message.groups "
+    "event subscription"
+)
+
 
 class SlackClient(Protocol):
     """The three WebClient methods this bot actually uses.
@@ -23,7 +36,9 @@ class SlackClient(Protocol):
 
     def auth_test(self) -> Any: ...
 
-    def conversations_list(self, *, types: str, limit: int) -> Any: ...
+    def conversations_list(
+        self, *, types: str, limit: int, cursor: str | None = None
+    ) -> Any: ...
 
     def chat_postMessage(self, *, channel: str, text: str) -> Any: ...
 
@@ -64,28 +79,81 @@ def check_scopes(client: SlackClient, log: logging.Logger) -> None:
         log.exception("Failed to validate OAuth scopes")
 
 
+def _list_all_channels(
+    client: SlackClient,
+    log: logging.Logger,
+    *,
+    types: str = "public_channel",
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """Every channel Slack will list for this token, following the cursor.
+
+    `types` is a parameter so that enabling private channels later is a one-line
+    change, but it has to stay "public_channel" by default: asking for
+    private_channel without the groups:read scope fails the *whole* call with
+    missing_scope rather than degrading to the public ones.
+    """
+    channels: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(MAX_CHANNEL_PAGES):
+        result = client.conversations_list(types=types, limit=limit, cursor=cursor)
+        # Subscripted, not .get(): a response with no "channels" key is
+        # malformed, and that KeyError is what drops the caller into its
+        # raw-names fallback. Extended into a fresh list, never aliased to the
+        # response's own, which would mutate it across calls.
+        channels.extend(result["channels"])
+        # `or {}` rather than a .get default: Slack sends response_metadata as
+        # null on some final pages, and None has no .get.
+        next_cursor = (result.get("response_metadata") or {}).get("next_cursor") or ""
+        if not next_cursor or next_cursor == cursor:
+            return channels
+        cursor = next_cursor
+    log.warning(
+        "Stopped paging conversations.list at %d pages; the channel list may be "
+        "incomplete, so some names will not resolve",
+        MAX_CHANNEL_PAGES,
+    )
+    return channels
+
+
 def resolve_channel_ids(
     client: SlackClient, names: Sequence[str], log: logging.Logger
 ) -> list[str]:
-    """Convert channel names to channel IDs via the Slack API."""
+    """Convert channel names to channel IDs via the Slack API.
+
+    Returns one entry per input name, always. A name that cannot be resolved is
+    passed through unchanged rather than dropped, because chat.postMessage
+    accepts a channel *name* — so the raw value still posts fine, and the only
+    caller that genuinely needs an ID (monitored channels, matched against the
+    ID on an incoming event) can spot a passthrough by comparing input to
+    output. Dropping used to make that caller silently receive an empty tuple.
+    """
     if not names:
         return []
     try:
-        result = client.conversations_list(types="public_channel", limit=1000)
-        name_to_id = {c["name"]: c["id"] for c in result["channels"]}
-        resolved = []
-        for name in names:
-            if name.startswith("C"):  # already looks like an ID
-                resolved.append(name)
-            elif name in name_to_id:
-                resolved.append(name_to_id[name])
-                log.info("Resolved channel '%s' -> %s", name, name_to_id[name])
-            else:
-                log.warning("Could not resolve channel name '%s' — not found", name)
-        return resolved
+        name_to_id = {c["name"]: c["id"] for c in _list_all_channels(client, log)}
     except Exception:
         log.exception("Failed to resolve channel names, falling back to raw values")
         return list(names)
+
+    # Outside the try: a failure in here is a bug, not an API problem, and
+    # should not be reported as a resolution failure.
+    resolved = []
+    for name in names:
+        if name.startswith("C"):  # already looks like an ID
+            resolved.append(name)
+        elif name in name_to_id:
+            resolved.append(name_to_id[name])
+            log.info("Resolved channel '%s' -> %s", name, name_to_id[name])
+        else:
+            resolved.append(name)
+            log.info(
+                "Channel '%s' is not among the %d channels this token can list "
+                "— passing the name through to Slack, which accepts names",
+                name,
+                len(name_to_id),
+            )
+    return resolved
 
 
 def resolve_config_channels(
@@ -97,9 +165,25 @@ def resolve_config_channels(
     rebinding. Safe to do before the bot exists because no events can arrive
     until SocketModeHandler.start(), the last statement of startup.
     """
-    monitored = tuple(resolve_channel_ids(client, list(config.monitored_channels), log))
+    names = list(config.monitored_channels)
+    monitored = resolve_channel_ids(client, names, log)
+    # An unresolved *monitored* name is the one case that actually breaks
+    # something: handle_message compares against the ID on the incoming event,
+    # so a bare name can never match and reactive posting silently dies. The
+    # posting paths cope with a raw name, which is why the resolver itself only
+    # logs at INFO and the warning lives here, where the consequence is known.
+    for name, resolved in zip(names, monitored):
+        if resolved == name and not name.startswith("C"):
+            log.warning(
+                "Monitored channel '%s' did not resolve to an ID, so reactive "
+                "posting will never fire for it — %s",
+                name,
+                PRIVATE_CHANNEL_HINT,
+            )
+
     schedule = config.schedule_channel
     if schedule:
-        resolved = resolve_channel_ids(client, [schedule], log)
-        schedule = resolved[0] if resolved else schedule
-    return replace(config, monitored_channels=monitored, schedule_channel=schedule)
+        schedule = resolve_channel_ids(client, [schedule], log)[0]
+    return replace(
+        config, monitored_channels=tuple(monitored), schedule_channel=schedule
+    )
